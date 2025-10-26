@@ -1,28 +1,38 @@
 -- ======================================================================================
--- Smart Auto-Farming System (All-in-One, Stable Version)
+-- Smart Auto-Farming System (Unified Version)
+-- Combines: Auto Restart, Card Selection, Seamless Retry, Event UI, Auto Ability
 -- ======================================================================================
 
-repeat task.wait() until game:IsLoaded() and game.Players.LocalPlayer
+repeat task.wait() until game.Players.LocalPlayer and game:IsLoaded()
 
--- Services
-local player = game:GetService("Players").LocalPlayer
+-- Core Services
+local player = game.Players.LocalPlayer
 local rs = game:GetService("ReplicatedStorage")
-local StarterGui = game:GetService("StarterGui")
 local uis = game:GetService("UserInputService")
+local http = game:GetService("HttpService")
+local StarterGui = game:GetService("StarterGui")
 local playerGui = player:WaitForChild("PlayerGui")
 local workspace = game:GetService("Workspace")
-local http = game:GetService("HttpService")
 
--- CONFIG
-local RESTART_WAVE = 50
-local AUTO_RESTART_INTERVAL = 6 * 60
-local MAX_RETRY_COUNT = 3
+-- System Configuration
+local CONFIG = {
+    RESTART_WAVE = 50,
+    AUTO_RESTART_INTERVAL = 6 * 60,
+    MAX_RETRY_COUNT = 3,
+    REMOTE_RETRY_COUNT = 3,
+    REMOTE_RETRY_DELAY = 1,
+    UI_TIMEOUT = 5,
+    ERROR_RESET_TIME = 60
+}
 
--- SETTINGS FILE
-local folderPath = "VectorHub"
-local gameFolderPath = folderPath .. "/Laststand/"
-local filePath = gameFolderPath .. player.Name .. ".json"
+-- File System
+local PATHS = {
+    BASE_FOLDER = "VectorHub",
+    GAME_FOLDER = "VectorHub/Laststand/",
+    SETTINGS_FILE = string.format("VectorHub/Laststand/%s.json", player.Name)
+}
 
+-- Global Settings
 _G.Settings = {
     AutoCard = true,
     AutoAbility = true,
@@ -32,331 +42,489 @@ _G.Settings = {
     LastRestart = os.clock()
 }
 
--- Card Priority
+-- Card Priority System
 local cardPriority = {
-    ["Weakened Resolve I"] = 13, ["Weakened Resolve II"] = 11, ["Weakened Resolve III"] = 4,
-    ["Fog of War I"] = 12, ["Fog of War II"] = 10, ["Fog of War III"] = 5,
-    ["Lingering Fear I"] = 6, ["Lingering Fear II"] = 2,
-    ["Power Reversal I"] = 14, ["Power Reversal II"] = 9,
-    ["Greedy Vampire's"] = 8, ["Hellish Gravity"] = 3, ["Deadly Striker"] = 7,
-    ["Critical Denial"] = 1, ["Trick or Treat Coin Flip"] = 15,
-    ["Devil's Sacrifice"] = 999, ["Bullet Breaker I"] = 999, ["Bullet Breaker II"] = 999, ["Bullet Breaker III"] = 999,
-    ["Hell Merchant I"] = 999, ["Hell Merchant II"] = 999, ["Hell Merchant III"] = 999,
-    ["Hellish Warp I"] = 999, ["Hellish Warp II"] = 999,
-    ["Fiery Surge I"] = 999, ["Fiery Surge II"] = 999,
-    ["Grevious Wounds I"] = 999, ["Grevious Wounds II"] = 999,
-    ["Scorching Hell I"] = 999, ["Scorching Hell II"] = 999,
-    ["Fortune Flow"] = 999, ["Soul Link"] = 999,
+    ["Critical Denial"] = 1,
+    ["Lingering Fear II"] = 2,
+    ["Hellish Gravity"] = 3,
+    ["Weakened Resolve III"] = 4,
+    ["Fog of War III"] = 5,
+    ["Lingering Fear I"] = 6,
+    ["Deadly Striker"] = 7,
+    ["Greedy Vampire's"] = 8,
+    ["Power Reversal II"] = 9,
+    ["Fog of War II"] = 10,
+    ["Weakened Resolve II"] = 11,
+    ["Fog of War I"] = 12,
+    ["Weakened Resolve I"] = 13,
+    ["Power Reversal I"] = 14,
+    ["Trick or Treat Coin Flip"] = 15,
+    -- Low Priority Cards
+    ["Devil's Sacrifice"] = 999,
+    ["Bullet Breaker I"] = 999,
+    ["Bullet Breaker II"] = 999,
+    ["Bullet Breaker III"] = 999,
+    ["Hell Merchant I"] = 999,
+    ["Hell Merchant II"] = 999,
+    ["Hell Merchant III"] = 999,
+    ["Hellish Warp I"] = 999,
+    ["Hellish Warp II"] = 999,
+    ["Fiery Surge I"] = 999,
+    ["Fiery Surge II"] = 999,
+    ["Grevious Wounds I"] = 999,
+    ["Grevious Wounds II"] = 999,
+    ["Scorching Hell I"] = 999,
+    ["Scorching Hell II"] = 999,
+    ["Fortune Flow"] = 999,
+    ["Soul Link"] = 999
 }
 
--- Utility
-local function notify(title, text)
+-- System State
+local State = {
+    errorCount = 0,
+    lastErrorTime = os.clock(),
+    hasRestarted = false,
+    lastAutoRestart = os.clock(),
+    matchCount = 0,
+    isSelectingCard = false,
+    connections = {}
+}
+
+-- Utility Functions
+local Utility = {}
+
+function Utility.notify(title, text)
     pcall(function()
-        StarterGui:SetCore("SendNotification", {Title = title; Text = text; Duration = 3;})
+        StarterGui:SetCore("SendNotification", {
+            Title = title,
+            Text = text,
+            Duration = 3
+        })
     end)
 end
 
-local function LoadSettings()
-    if not isfolder(folderPath) then makefolder(folderPath) end
-    if not isfolder(gameFolderPath) then makefolder(gameFolderPath) end
-    if not isfile(filePath) then
-        writefile(filePath, http:JSONEncode(_G.Settings))
-    else
-        local success, data = pcall(function()
-            return http:JSONDecode(readfile(filePath))
+function Utility.addConnection(connection)
+    if connection and typeof(connection) == "RBXScriptConnection" then
+        table.insert(State.connections, connection)
+    end
+    return connection
+end
+
+function Utility.cleanup()
+    for _, connection in ipairs(State.connections) do
+        if connection and connection.Connected then
+            pcall(function() connection:Disconnect() end)
+        end
+    end
+    table.clear(State.connections)
+end
+
+function Utility.invokeRemoteWithRetry(remote, ...)
+    for i = 1, CONFIG.REMOTE_RETRY_COUNT do
+        local success, result = pcall(function()
+            return remote:InvokeServer(...)
         end)
-        if success and type(data) == "table" then
-            for i, v in pairs(data) do
-                _G.Settings[i] = v
-            end
-        end
+        if success then return result end
+        task.wait(CONFIG.REMOTE_RETRY_DELAY)
+    end
+    return nil
+end
+
+function Utility.handleError(err)
+    local currentTime = os.clock()
+    if currentTime - State.lastErrorTime > CONFIG.ERROR_RESET_TIME then
+        State.errorCount = 0
+    end
+    State.errorCount += 1
+    State.lastErrorTime = currentTime
+    Utility.notify("Error", tostring(err))
+    if State.errorCount >= CONFIG.MAX_RETRY_COUNT then
+        State.errorCount = 0
+        System.smartRestart("Error Recovery")
     end
 end
 
-local function SaveSettings()
-    writefile(filePath, http:JSONEncode(_G.Settings))
-end
-
--- Seamless Retry
-local Settings = playerGui:WaitForChild("Settings")
-local SV = Settings:WaitForChild("SeamlessRetry")
-local restartRemote = rs.Remotes:FindFirstChild("RestartMatch")
-local setSettingsRemote = rs.Remotes:FindFirstChild("SetSettings")
-local abilityRemote = rs.Remotes:FindFirstChild("Ability")
-
-local matchCount = 0
-local hasRestarted = false
-local lastAutoRestart = os.clock()
-local isSelectingCard = false
-
-local function setSeamlessRetry(state)
-    if setSettingsRemote and SV then
-        setSettingsRemote:InvokeServer("SeamlessRetry", state)
-        SV.Value = state
+-- Safe WaitForChild with timeout and debug notification
+local function safeWaitForChild(parent, childName, timeout)
+    local startTime = os.clock()
+    local obj = parent:FindFirstChild(childName)
+    while not obj and os.clock() - startTime < (timeout or CONFIG.UI_TIMEOUT) do
+        task.wait(0.1)
+        obj = parent:FindFirstChild(childName)
     end
+    if not obj then
+        Utility.notify("UI Error", "Missing UI element: " .. tostring(childName))
+    end
+    return obj
 end
 
-if not SV.Value then
-    setSeamlessRetry(true)
-    notify("Seamless Retry", "Enabled")
-end
+-- File System Functions
+local FileSystem = {}
 
--- Auto Restart Logic
-local function getWaveLabel()
-    local ok, label = pcall(function()
-        return player.PlayerGui.MainUI.Top.Wave.Value
+function FileSystem.ensureFolders()
+    pcall(function()
+        if not isfolder(PATHS.BASE_FOLDER) then makefolder(PATHS.BASE_FOLDER) end
+        if not isfolder(PATHS.GAME_FOLDER) then makefolder(PATHS.GAME_FOLDER) end
     end)
-    return ok and label or nil
 end
 
-local function restartGame()
-    if not hasRestarted then
-        hasRestarted = true
-        setSeamlessRetry(false)
-        restartRemote:FireServer()
-        task.wait(5)
-        hasRestarted = false
-        lastAutoRestart = os.clock()
-        setSeamlessRetry(true)
-        matchCount = 0
-        notify("Restart Complete", "New round started. Seamless Retry Enabled.")
-    end
-end
-
-local function checkWave()
-    local waveLabel = getWaveLabel()
-    if not waveLabel then return end
-    local currentWave = tonumber(waveLabel.Text)
-    if currentWave and currentWave >= RESTART_WAVE then
-        restartGame()
-    end
-end
-
--- Auto Restart by Time
-task.spawn(function()
-    while task.wait(10) do
-        local waveLabel = getWaveLabel()
-        if waveLabel and os.clock() - lastAutoRestart >= AUTO_RESTART_INTERVAL then
-            restartGame()
-        end
-    end
-end)
-
--- Watch Wave for Auto Restart (สร้าง connection ครั้งเดียว)
-local waveLabel = getWaveLabel()
-local waveConnection
-if waveLabel then
-    if waveConnection then waveConnection:Disconnect() end
-    waveConnection = waveLabel:GetPropertyChangedSignal("Text"):Connect(checkWave)
-end
-
--- Watch EndGameUI for Match Count (สร้าง connection ครั้งเดียว)
-local childAddedConnection
-if childAddedConnection then childAddedConnection:Disconnect() end
-childAddedConnection = playerGui.ChildAdded:Connect(function(c)
-    if c.Name == "EndGameUI" then
-        matchCount = matchCount + 1
-        notify("Match Finished", "Game Count: " .. matchCount .. "/" .. MAX_RETRY_COUNT)
-        c.AncestryChanged:Wait()
-        if matchCount >= MAX_RETRY_COUNT then
-            notify("Waiting", "Waiting 10s before restart")
-            restartGame()
-        end
-    end
-end)
-
--- Card Selection Logic
-local function getAvailableCards()
-    local prompt = playerGui:FindFirstChild("Prompt")
-    if not prompt then return nil end
-    local frame = prompt:FindFirstChild("Frame")
-    if not frame then return nil end
-    local cards = {}
-    for _, descendant in ipairs(frame:GetDescendants()) do
-        if descendant:IsA("TextLabel") and cardPriority[descendant.Text] then
-            local button = descendant.Parent
-            while button and not (button:IsA("GuiButton") or button:IsA("TextButton") or button:IsA("ImageButton")) do
-                button = button.Parent
-            end
-            if button then
-                table.insert(cards, {name = descendant.Text, button = button})
+function FileSystem.loadSettings()
+    FileSystem.ensureFolders()
+    pcall(function()
+        if not isfile(PATHS.SETTINGS_FILE) then
+            writefile(PATHS.SETTINGS_FILE, http:JSONEncode(_G.Settings))
+        else
+            local success, data = pcall(function() 
+                return http:JSONDecode(readfile(PATHS.SETTINGS_FILE)) 
+            end)
+            if success and type(data) == "table" then
+                for i, v in pairs(data) do 
+                    if _G.Settings[i] ~= nil then _G.Settings[i] = v end 
+                end
             end
         end
-    end
-    return #cards > 0 and cards or nil
+    end)
 end
 
-local function findBestCard(availableCards)
-    local bestIndex = 1
-    local bestPriority = math.huge
-    for cardIndex = 1, #availableCards do
-        local cardData = availableCards[cardIndex]
+function FileSystem.saveSettings()
+    pcall(function()
+        writefile(PATHS.SETTINGS_FILE, http:JSONEncode(_G.Settings))
+    end)
+end
+
+-- Remote Functions
+local Remotes = {
+    restart = rs.Remotes:FindFirstChild("RestartMatch"),
+    settings = rs.Remotes:FindFirstChild("SetSettings"),
+    ability = rs.Remotes:FindFirstChild("Ability"),
+    seamlessRetry = safeWaitForChild(safeWaitForChild(playerGui, "Settings", CONFIG.UI_TIMEOUT), "SeamlessRetry", CONFIG.UI_TIMEOUT)
+}
+
+-- Wave Management
+local WaveSystem = {}
+
+function WaveSystem.getWaveLabel()
+    local startTime = os.clock()
+    repeat
+        local label = playerGui:FindFirstChild("MainUI") 
+            and playerGui.MainUI:FindFirstChild("Top")
+            and playerGui.MainUI.Top:FindFirstChild("Wave")
+            and playerGui.MainUI.Top.Wave:FindFirstChild("Value")
+        if label then return label end
+        task.wait(0.1)
+    until os.clock() - startTime > CONFIG.UI_TIMEOUT
+    return nil
+end
+
+function WaveSystem.getCurrentWave()
+    local label = WaveSystem.getWaveLabel()
+    if label and label:IsA("TextLabel") then 
+        return tonumber(label.Text)
+    end
+    return nil
+end
+
+function WaveSystem.checkWave()
+    local currentWave = WaveSystem.getCurrentWave()
+    if currentWave then
+        _G.Settings.LastWave = currentWave
+        FileSystem.saveSettings()
+        if currentWave >= CONFIG.RESTART_WAVE then
+            System.smartRestart("Reached Wave " .. currentWave)
+        end
+    end
+end
+
+-- Card Selection System
+local CardSystem = {}
+
+function CardSystem.getAvailableCards()
+    local startTime = os.clock()
+    repeat
+        local prompt = playerGui:FindFirstChild("Prompt")
+        if prompt and prompt.Visible then
+            local cardContainer = prompt:FindFirstChild("Frame") 
+                and prompt.Frame:FindFirstChild("Frame")
+            if cardContainer then
+                local cards = {}
+                for _, button in pairs(cardContainer:GetChildren()) do
+                    if button:IsA("GuiButton") then
+                        local nameLabel = button:FindFirstChild("Frame") 
+                            and button.Frame:FindFirstChild("TextLabel")
+                        if nameLabel and cardPriority[nameLabel.Text] then
+                            table.insert(cards, {name = nameLabel.Text, button = button})
+                        end
+                    end
+                end
+                if #cards > 0 then return cards end
+            end
+        end
+        task.wait(0.1)
+    until os.clock() - startTime > CONFIG.UI_TIMEOUT
+    return nil
+end
+
+function CardSystem.findBestCard(availableCards)
+    local bestCardData = availableCards[1]
+    local bestPriority = cardPriority[bestCardData.name] or 999
+    for i = 2, #availableCards do
+        local cardData = availableCards[i]
         local priority = cardPriority[cardData.name] or 999
         if priority < bestPriority then
             bestPriority = priority
-            bestIndex = cardIndex
+            bestCardData = cardData
         end
     end
-    return availableCards[bestIndex]
+    return bestCardData
 end
 
-local function pressConfirmButton()
+function CardSystem.pressConfirmButton()
     local prompt = playerGui:FindFirstChild("Prompt")
-    if not prompt then return false end
-    local frame = prompt:FindFirstChild("Frame")
-    if not frame then return false end
-    local innerFrame = frame:FindFirstChild("Frame")
-    if not innerFrame then return false end
-    local children = innerFrame:GetChildren()
-    if #children < 5 then return false end
-    local button = children[5]:FindFirstChild("TextButton")
-    if button and button:FindFirstChild("TextLabel") and button.TextLabel.Text == "Confirm" then
-        pcall(function()
-            for _, conn in ipairs(getconnections(button.MouseButton1Click)) do
-                conn:Fire()
-            end
-        end)
+    local confirmButton = prompt and prompt.Frame and prompt.Frame.Frame 
+        and prompt.Frame.Frame.Children[5] and prompt.Frame.Frame.Children[5].TextButton
+    if confirmButton and confirmButton:IsA("TextButton") 
+        and confirmButton.TextLabel.Text == "Confirm" then
+        pcall(function() confirmButton:FireClick() end)
+        Utility.notify("Card Selector", "Confirmed!")
         return true
     end
     return false
 end
 
-local function selectCard()
-    if not _G.Settings.AutoCard or isSelectingCard then return end
-    isSelectingCard = true
-    local availableCards = getAvailableCards()
-    if not availableCards then isSelectingCard = false return end
-    local bestCardData = findBestCard(availableCards)
-    if bestCardData and bestCardData.button then
-        pcall(function()
-            for _, conn in ipairs(getconnections(bestCardData.button.MouseButton1Click)) do
-                conn:Fire()
-            end
-        end)
-        task.wait(0.2)
-        pressConfirmButton()
-    end
-    isSelectingCard = false
+function CardSystem.selectCard()
+    if State.isSelectingCard then return false end
+    local availableCards = CardSystem.getAvailableCards()
+    if not availableCards then return false end
+    State.isSelectingCard = true
+    local bestCardData = CardSystem.findBestCard(availableCards)
+    Utility.notify("Card Selector", "Selecting: " .. (bestCardData.name or "Unknown"))
+    pcall(function() bestCardData.button:FireClick() end)
+    task.wait(0.5)
+    CardSystem.pressConfirmButton()
+    State.isSelectingCard = false
+    return true
 end
 
--- Auto Ability Logic
-task.spawn(function()
-    while task.wait(1) do
-        if _G.Settings.AutoAbility then
-            local waveLabel = getWaveLabel()
-            local currentWave = waveLabel and tonumber(waveLabel.Text)
-            if currentWave and currentWave >= RESTART_WAVE then
-                local towers = workspace:FindFirstChild("Towers")
-                local enemies = workspace:FindFirstChild("Enemies")
-                if towers and enemies then
-                    for _, enemy in pairs(enemies:GetChildren()) do
-                        if enemy.Name == "Boss" then
-                            local args1 = {towers:FindFirstChild("LelouchEvo"), "Submission"}
-                            local args2 = {towers:FindFirstChild("LelouchEvo"), "All of you, Die!"}
-                            local args3 = {towers:FindFirstChild("AsuraEvo"), "Lines of Sanzu"}
-                            if args1[1] then abilityRemote:InvokeServer(unpack(args1)) end
-                            if args2[1] then abilityRemote:InvokeServer(unpack(args2)) end
-                            if args3[1] then abilityRemote:InvokeServer(unpack(args3)) end
-                        end
-                    end
-                end
+-- Ability System
+local AbilitySystem = {}
+
+function AbilitySystem.checkBoss()
+    local enemies = workspace:FindFirstChild("Enemies")
+    if not enemies then return false end
+    for _, enemy in pairs(enemies:GetChildren()) do
+        if enemy.Name == "Boss" then return true end
+    end
+    return false
+end
+
+function AbilitySystem.fireAbility(unitName, abilityName)
+    local towers = workspace:FindFirstChild("Towers")
+    if not towers then return false end
+    local unit = towers:FindFirstChild(unitName)
+    if unit and Remotes.ability then
+        Utility.invokeRemoteWithRetry(Remotes.ability, unit, abilityName)
+        task.wait(0.1)
+        return true
+    end
+    return false
+end
+
+function AbilitySystem.autoAbility(currentWave)
+    if not _G.Settings.AutoAbility or not Remotes.ability then return end
+    if currentWave and currentWave >= CONFIG.RESTART_WAVE then
+        if AbilitySystem.checkBoss() then
+            local abilitiesUsed = 0
+            if AbilitySystem.fireAbility("LelouchEvo", "Submission") then abilitiesUsed += 1 end
+            if AbilitySystem.fireAbility("LelouchEvo", "All of you, Die!") then abilitiesUsed += 1 end
+            if AbilitySystem.fireAbility("AsuraEvo", "Lines of Sanzu") then abilitiesUsed += 1 end
+            if abilitiesUsed > 0 then
+                Utility.notify("Auto Ability", "Used " .. abilitiesUsed .. " abilities!")
             end
         end
-        selectCard()
-    end
-end)
-
--- Event UI & Toggle
-local gui = Instance.new("ScreenGui")
-gui.Name = "HalloweenToggleGUI"
-gui.ResetOnSpawn = false
-gui.Parent = playerGui
-
-local p1Button = Instance.new("TextButton")
-p1Button.Size = UDim2.new(0, 180, 0, 40)
-p1Button.Position = UDim2.new(0, 10, 0, 10)
-p1Button.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-p1Button.TextColor3 = Color3.fromRGB(255, 255, 255)
-p1Button.TextSize = 18
-p1Button.Font = Enum.Font.GothamBold
-p1Button.Parent = gui
-
-local p2Button = Instance.new("TextButton")
-p2Button.Size = UDim2.new(0, 180, 0, 40)
-p2Button.Position = UDim2.new(0, 10, 0, 60)
-p2Button.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-p2Button.TextColor3 = Color3.fromRGB(255, 255, 255)
-p2Button.TextSize = 18
-p2Button.Font = Enum.Font.GothamBold
-p2Button.Parent = gui
-
-local function updateP1()
-    if _G.Settings.HalloweenP1 then
-        p1Button.BackgroundColor3 = Color3.fromRGB(0, 180, 90)
-        p1Button.Text = "P1: ON"
-    else
-        p1Button.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
-        p1Button.Text = "P1: OFF"
     end
 end
 
-local function updateP2()
-    if _G.Settings.HalloweenP2 then
-        p2Button.BackgroundColor3 = Color3.fromRGB(0, 180, 90)
-        p2Button.Text = "P2: ON"
-    else
-        p2Button.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
-        p2Button.Text = "P2: OFF"
-    end
-end
+-- Event System
+local EventSystem = {}
 
-local function startP1()
+function EventSystem.startEvent(eventName)
+    local function waitForFolder()
+        local startTime = os.clock()
+        repeat
+            local eventFolder = rs:FindFirstChild("Events") 
+                and rs.Events:FindFirstChild("Hallowen2025")
+            if eventFolder then return eventFolder end
+            task.wait(0.5)
+        until os.clock() - startTime > CONFIG.UI_TIMEOUT
+        return nil
+    end
+    local eventFolder = waitForFolder()
+    if not eventFolder then 
+        Utility.notify("Event Error", "Could not find event folder")
+        return 
+    end
     if game.PlaceId == 12886143095 or game.PlaceId == 18583778121 then
-        rs:WaitForChild("Events"):WaitForChild("Hallowen2025"):WaitForChild("Enter"):FireServer()
-        task.wait(3)
-        rs:WaitForChild("Events"):WaitForChild("Hallowen2025"):WaitForChild("Start"):FireServer()
+        local success = pcall(function()
+            eventFolder:WaitForChild("Enter", 5):FireServer(eventName)
+            task.wait(3)
+            eventFolder:WaitForChild("Start", 5):FireServer(eventName)
+        end)
+        if success then
+            Utility.notify("Event Starter", "Started: " .. (eventName or "P1"))
+        else
+            Utility.notify("Event Error", "Failed to start event")
+        end
     end
 end
 
-local function startP2()
-    if game.PlaceId == 12886143095 or game.PlaceId == 18583778121 then
-        rs:WaitForChild("Events"):WaitForChild("Hallowen2025"):WaitForChild("Enter"):FireServer("Hallowen2025_P2")
-        task.wait(3)
-        rs:WaitForChild("Events"):WaitForChild("Hallowen2025"):WaitForChild("Start"):FireServer("Hallowen2025_P2")
+-- UI System
+local UISystem = {
+    p1Button = nil,
+    p2Button = nil
+}
+
+function UISystem.updateUI()
+    if UISystem.p1Button then
+        local p1Enabled = _G.Settings.HalloweenP1
+        UISystem.p1Button.BackgroundColor3 = p1Enabled and 
+            Color3.fromRGB(0, 180, 90) or Color3.fromRGB(180, 50, 50)
+        UISystem.p1Button.Text = "P1: " .. (p1Enabled and "ON" or "OFF")
+    end
+    if UISystem.p2Button then
+        local p2Enabled = _G.Settings.HalloweenP2
+        UISystem.p2Button.BackgroundColor3 = p2Enabled and 
+            Color3.fromRGB(0, 180, 90) or Color3.fromRGB(180, 50, 50)
+        UISystem.p2Button.Text = "P2: " .. (p2Enabled and "ON" or "OFF")
     end
 end
 
-local function toggleP1()
+function UISystem.toggleP1()
     _G.Settings.HalloweenP1 = not _G.Settings.HalloweenP1
-    SaveSettings()
-    updateP1()
-    if _G.Settings.HalloweenP1 then startP1() end
+    FileSystem.saveSettings()
+    UISystem.updateUI()
+    if _G.Settings.HalloweenP1 then task.spawn(EventSystem.startEvent, nil) end
 end
 
-local function toggleP2()
+function UISystem.toggleP2()
     _G.Settings.HalloweenP2 = not _G.Settings.HalloweenP2
-    SaveSettings()
-    updateP2()
-    if _G.Settings.HalloweenP2 then startP2() end
+    FileSystem.saveSettings()
+    UISystem.updateUI()
+    if _G.Settings.HalloweenP2 then task.spawn(EventSystem.startEvent, "Hallowen2025_P2") end
 end
 
-p1Button.MouseButton1Click:Connect(toggleP1)
-p2Button.MouseButton1Click:Connect(toggleP2)
+function UISystem.setup()
+    pcall(function()
+        local existingGui = playerGui:FindFirstChild("HalloweenToggleGUI")
+        if existingGui then existingGui:Destroy() end
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "HalloweenToggleGUI"
+        gui.ResetOnSpawn = false
+        gui.Parent = playerGui
+        local function createButton(name, position, clickFunc)
+            local button = Instance.new("TextButton")
+            button.Size = UDim2.new(0, 180, 0, 40)
+            button.Position = position
+            button.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+            button.TextColor3 = Color3.fromRGB(255, 255, 255)
+            button.TextSize = 18
+            button.Font = Enum.Font.GothamBold
+            button.Parent = gui
+            Utility.addConnection(button.MouseButton1Click:Connect(clickFunc))
+            return button
+        end
+        UISystem.p1Button = createButton("P1Button", UDim2.new(0, 10, 0, 10), UISystem.toggleP1)
+        UISystem.p2Button = createButton("P2Button", UDim2.new(0, 10, 0, 60), UISystem.toggleP2)
+        Utility.addConnection(uis.InputBegan:Connect(function(input, gameProcessed)
+            if gameProcessed then return end
+            if input.KeyCode == Enum.KeyCode.PageUp then UISystem.toggleP1()
+            elseif input.KeyCode == Enum.KeyCode.PageDown then UISystem.toggleP2() end
+        end))
+        UISystem.updateUI()
+    end)
+end
 
-uis.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
-    if input.KeyCode == Enum.KeyCode.PageUp then
-        toggleP1()
-    elseif input.KeyCode == Enum.KeyCode.PageDown then
-        toggleP2()
+-- Main System
+local System = {}
+
+function System.smartRestart(reason)
+    if State.hasRestarted or State.isSelectingCard or not Remotes.restart then return end 
+    State.hasRestarted = true
+    Utility.notify("Smart Restart", "Reason: " .. reason .. ". Waiting 10s...")
+    if Remotes.settings and Remotes.seamlessRetry then
+        Utility.invokeRemoteWithRetry(Remotes.settings, "SeamlessRetry", false)
+        Remotes.seamlessRetry.Value = false
     end
-end)
+    task.wait(10)
+    pcall(function() Remotes.restart:FireServer() end)
+    State.matchCount = 0 
+    task.wait(5)
+    State.hasRestarted = false
+    State.lastAutoRestart = os.clock()
+    _G.Settings.LastRestart = State.lastAutoRestart
+    if Remotes.settings and Remotes.seamlessRetry then
+        Utility.invokeRemoteWithRetry(Remotes.settings, "SeamlessRetry", true)
+        Remotes.seamlessRetry.Value = true
+    end
+    FileSystem.saveSettings()
+    Utility.notify("Restart Complete", "New round started. Seamless Retry Enabled.")
+end
 
-updateP1()
-updateP2()
+function System.watchEndUI(ui)
+    if State.hasRestarted then return end 
+    State.matchCount += 1
+    Utility.notify("Match Finished", "Game Count: " .. State.matchCount .. "/" .. CONFIG.MAX_RETRY_COUNT)
+    local isRemoved = false
+    local connection = ui.AncestryChanged:Connect(function(child, parent)
+        if child == ui and not parent then isRemoved = true end
+    end)
+    repeat task.wait() until isRemoved or not ui.Parent
+    pcall(function() connection:Disconnect() end)
+    if State.matchCount >= CONFIG.MAX_RETRY_COUNT then
+        System.smartRestart("Reached Max Retries (" .. CONFIG.MAX_RETRY_COUNT .. ")")
+    end
+end
 
-if _G.Settings.HalloweenP1 then task.defer(startP1) end
-if _G.Settings.HalloweenP2 then task.defer(startP2) end
+function System.initialize()
+    FileSystem.loadSettings()
+    UISystem.setup()
+    Utility.notify("System Loaded", "Smart Auto-Farming System is Active!")
+    -- Start Events
+    if _G.Settings.HalloweenP1 then task.defer(EventSystem.startEvent, nil) end
+    if _G.Settings.HalloweenP2 then task.defer(EventSystem.startEvent, "Hallowen2025_P2") end
+    -- Setup Wave Monitoring
+    local waveLabel = WaveSystem.getWaveLabel()
+    if waveLabel then
+        Utility.addConnection(
+            waveLabel:GetPropertyChangedSignal("Text"):Connect(WaveSystem.checkWave)
+        )
+    end
+    -- Watch for EndGameUI
+    Utility.addConnection(playerGui.ChildAdded:Connect(function(child)
+        if child.Name == "EndGameUI" then System.watchEndUI(child) end
+    end))
+    -- Auto Restart Timer
+    task.spawn(function()
+        while task.wait(10) do
+            if os.clock() - State.lastAutoRestart >= CONFIG.AUTO_RESTART_INTERVAL then
+                System.smartRestart(
+                    "Timed Restart (" .. CONFIG.AUTO_RESTART_INTERVAL/60 .. " mins)"
+                )
+            end
+        end
+    end)
+    -- Main Loop
+    task.spawn(function()
+        while task.wait(1) do
+            if _G.Settings.AutoCard and not State.isSelectingCard then
+                CardSystem.selectCard()
+            end
+            local currentWave = WaveSystem.getCurrentWave()
+            if currentWave then
+                AbilitySystem.autoAbility(currentWave)
+            end
+        end
+    end)
+end
 
-LoadSettings()
-notify("System Loaded", "Smart Auto-Farming System is Active!")
+-- Start the system
+System.initialize()
